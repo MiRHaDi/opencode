@@ -156,7 +156,7 @@ export function TerminalPane(props: {
 
   createEffect(() => {
     const tokens = themes.currentTokens()
-    terminalTheme = terminalPalette(tokens, tokens.background.raised.base)
+    terminalTheme = terminalPalette(tokens, themes.mode(), tokens.background.raised.base)
     applyTerminalTheme()
   })
 
@@ -335,26 +335,25 @@ function sameSize(first: TerminalSize | undefined, second: TerminalSize | undefi
   return !!first && !!second && first.cols === second.cols && first.rows === second.rows
 }
 
-function terminalPalette(theme: ResolvedThemeTokens, background: RGBA) {
-  const base = 200
-  const bright = 100
-  const colors = [
-    background,
+export function terminalPalette(theme: ResolvedThemeTokens, mode: "light" | "dark", background: RGBA) {
+  const black = theme.hue.neutral[mode === "dark" ? 800 : 200]
+  const white = theme.hue.neutral[mode === "dark" ? 200 : 800]
+  const brightWhite = theme.hue.neutral[mode === "dark" ? 100 : 900]
+  const normal = [
     theme.text.feedback.error.base,
     theme.text.feedback.success.base,
     theme.text.feedback.warning.base,
-    theme.hue.blue[base],
-    theme.hue.purple[base],
+    theme.hue.accent[200],
+    theme.hue.accent[200],
     theme.text.feedback.info.base,
-    theme.text.base,
+    white,
+  ]
+  const colors = [
+    black,
+    ...normal,
     theme.text.muted,
-    theme.text.feedback.error.muted,
-    theme.text.feedback.success.muted,
-    theme.text.feedback.warning.muted,
-    theme.hue.blue[bright],
-    theme.hue.purple[bright],
-    theme.hue.cyan[bright],
-    theme.hue.neutral[100],
+    ...normal.slice(0, -1).map((color) => theme.decrease(color)),
+    brightWhite,
   ]
   return Buffer.from(
     colors
