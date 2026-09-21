@@ -265,6 +265,8 @@ export interface ParserState {
   readonly finishReason?: FinishReasonDetails
   readonly lifecycle: Lifecycle.State
   readonly reasoningField?: string
+  /** A scalar reasoning field (`reasoning_content`, ...) has carried text in this stream. */
+  readonly reasoningTextObserved: boolean
   readonly reasoningDetails: Array<unknown>
   readonly reasoningDetailsObserved: boolean
   readonly reasoningEmitted: boolean
@@ -344,9 +346,17 @@ const reasoningDetails = (parts: ReadonlyArray<ReasoningPart>, native: unknown, 
     return Array.isArray(details) ? details : []
   })
   if (parts.some((part) => Array.isArray(part.providerMetadata?.[providerMetadataKey]?.reasoningDetails)))
-    return observed
-  if (isRecord(native) && Array.isArray(native.reasoning_details)) return native.reasoning_details
+    return observed.map(lowerReasoningDetail)
+  if (isRecord(native) && Array.isArray(native.reasoning_details)) return native.reasoning_details.map(lowerReasoningDetail)
 }
+
+// OpenRouter requires its `reasoning.*` entries back unmodified, `index`
+// included. Kimi rejects its stream-only `index` on requests
+// ("the reasoning_details ... must not contain streaming index") and Kimi Code
+// never sends it, so drop it from Kimi entries while leaving every other
+// dialect untouched.
+const lowerReasoningDetail = (detail: unknown) =>
+  isKimiDetail(detail) ? Object.fromEntries(Object.entries(detail).filter((entry) => entry[0] !== "index")) : detail
 
 const lowerUserMessage = Effect.fn("OpenAIChat.lowerUserMessage")(function* (
   message: OpenAIChatRequestMessage,
@@ -413,6 +423,9 @@ const lowerAssistantMessage = Effect.fn("OpenAIChat.lowerAssistantMessage")(func
     if (observedField !== undefined) return observedField
     if (nativeReasoning !== undefined) return "reasoning_content"
     if (!fullyStructured || requireReasoning) return "reasoning_content"
+    // Kimi always expects `reasoning_content` on replayed assistant messages,
+    // even when thinking arrived only through structured details.
+    if (details?.some(isKimiDetail)) return "reasoning_content"
   })()
   const reasoningText = (() => {
     if (configuredField !== undefined)
@@ -887,11 +900,31 @@ const reasoningDelta = (
   return undefined
 }
 
-const detailText = (details: ReadonlyArray<unknown>) => {
+// Kimi's OpenAI-compatible surface streams preserved thinking through a
+// `reasoning_details` shape that is similar to, but not the same as, the
+// OpenRouter `reasoning.*` dialect: `{ type: "summary", summary }` and
+// `{ type: "encrypted", encrypted }` entries keyed by a stream-only `index`.
+// Kimi does not document this publicly; the expected handling is taken from
+// how Kimi Code (Kimi's own client) behaves: merge summary deltas by `index`,
+// and replay the entries without `index` alongside `reasoning_content`.
+const isKimiDetail = (detail: unknown): detail is Record<string, unknown> =>
+  isRecord(detail) && (detail.type === "summary" || detail.type === "encrypted")
+
+// The field that accumulates across streamed deltas for mergeable detail kinds.
+const mergeableDetailField = (detail: Record<string, unknown>) => {
+  if (detail.type === "reasoning.text") return "text"
+  if (detail.type === "reasoning.summary" || detail.type === "summary") return "summary"
+}
+
+const detailText = (details: ReadonlyArray<unknown>, hideKimiSummary: boolean) => {
   const text = details.flatMap((detail) => {
     if (!isRecord(detail)) return []
     if (detail.type === "reasoning.text" && typeof detail.text === "string" && detail.text) return [detail.text]
     if (detail.type === "reasoning.summary" && typeof detail.summary === "string" && detail.summary)
+      return [detail.summary]
+    // Kimi streams the full thinking through `reasoning_content` and a separate
+    // summary through details; show the summary only when nothing else does.
+    if (detail.type === "summary" && !hideKimiSummary && typeof detail.summary === "string" && detail.summary)
       return [detail.summary]
     return []
   })
@@ -901,30 +934,32 @@ const detailText = (details: ReadonlyArray<unknown>) => {
 const appendReasoningDetails = (result: Array<unknown>, details: ReadonlyArray<unknown>) => {
   for (const detail of details) {
     const previous = result.at(-1)
+    const field = isRecord(detail) ? mergeableDetailField(detail) : undefined
     if (
+      field === undefined ||
       !isRecord(previous) ||
-      previous.type !== "reasoning.text" ||
       !isRecord(detail) ||
-      detail.type !== "reasoning.text" ||
-      conflictingReasoningTextDetails(previous, detail)
+      previous.type !== detail.type ||
+      conflictingReasoningDetails(previous, detail)
     ) {
       result.push(detail)
       continue
     }
-    result[result.length - 1] = {
+    const merged = {
       ...previous,
       ...Object.fromEntries(Object.entries(detail).filter((entry) => entry[1] !== undefined)),
-      text: `${typeof previous.text === "string" ? previous.text : ""}${typeof detail.text === "string" ? detail.text : ""}`,
+      [field]: `${typeof previous[field] === "string" ? previous[field] : ""}${typeof detail[field] === "string" ? detail[field] : ""}`,
       signature: mergeDetailValue(previous.signature, detail.signature),
       format: mergeDetailValue(previous.format, detail.format),
     }
+    result[result.length - 1] = Object.fromEntries(Object.entries(merged).filter((entry) => entry[1] !== undefined))
   }
 }
 
 const mergeDetailValue = (previous: unknown, current: unknown) =>
   previous || current || (previous !== undefined ? previous : current)
 
-const conflictingReasoningTextDetails = (previous: Record<string, unknown>, current: Record<string, unknown>) =>
+const conflictingReasoningDetails = (previous: Record<string, unknown>, current: Record<string, unknown>) =>
   conflictingDetailValue(previous.id, current.id) ||
   conflictingDetailValue(previous.index, current.index) ||
   conflictingDetailValue(previous.format, current.format) ||
@@ -999,11 +1034,14 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
     }
 
     const reasoningField = state.reasoningField ?? reasoning?.field
+    const reasoningTextObserved = state.reasoningTextObserved || reasoning !== undefined
     const detailDelta = Array.isArray(delta?.reasoning_details) ? delta.reasoning_details : undefined
     if (detailDelta !== undefined) appendReasoningDetails(state.reasoningDetails, detailDelta)
     const reasoningDetailsObserved = state.reasoningDetailsObserved || detailDelta !== undefined
     const deltaMetadata = reasoningMetadata(state.providerMetadataKey, reasoningField)
-    const text = detailDelta?.length ? (detailText(detailDelta) ?? reasoning?.text) : reasoning?.text
+    const text = detailDelta?.length
+      ? (detailText(detailDelta, reasoningTextObserved) ?? reasoning?.text)
+      : reasoning?.text
     if (text !== undefined) lifecycle = Lifecycle.reasoningDelta(lifecycle, events, "reasoning-0", text, deltaMetadata)
     else if (
       reasoningDetailsObserved &&
@@ -1099,6 +1137,7 @@ const step = (state: ParserState, event: OpenAIChatEvent) =>
         finishReason,
         lifecycle,
         reasoningField,
+        reasoningTextObserved,
         reasoningDetails: state.reasoningDetails,
         reasoningDetailsObserved,
         reasoningEmitted,
@@ -1179,6 +1218,7 @@ export const protocol = Protocol.make({
       toolCallEvents: [],
       lifecycle: Lifecycle.initial(),
       reasoningField: request.model.compatibility?.reasoningField,
+      reasoningTextObserved: false,
       reasoningDetails: [],
       reasoningDetailsObserved: false,
       reasoningEmitted: false,
