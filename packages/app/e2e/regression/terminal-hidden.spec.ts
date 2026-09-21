@@ -117,6 +117,7 @@ test("animates review and terminal panels while caching hidden terminal content"
   await page.evaluate(() => (document.documentElement.dir = "ltr"))
 
   const panel = page.locator("#terminal-panel")
+  const sidePanel = page.locator('[data-slot="side-terminal-panel-presence"]')
   const terminalContent = page.locator('[data-component="terminal"]')
   await page.keyboard.press("Control+Backquote")
   await expect(panel).toBeVisible()
@@ -126,6 +127,7 @@ test("animates review and terminal panels while caching hidden terminal content"
   await expectHeightMotions(page, "session-side-terminal-region", 1)
   await expectStackedGeometry(page)
   await expectPanelGapHeld(page)
+  await expect(sidePanel).not.toHaveCSS("box-shadow", "none")
 
   await resetTerminalBottomMotion(page)
   await resetTerminalAnchorGaps(page)
@@ -171,6 +173,7 @@ test("animates review and terminal panels while caching hidden terminal content"
   await page.keyboard.press("Control+Backquote")
   await expect(panel).toHaveAttribute("aria-hidden", "false")
   await expect(page.locator('[data-component="terminal"]')).toBeVisible()
+  await expect(sidePanel).toHaveCSS("box-shadow", "none")
   await expectWidthMotions(page, 3)
   await expectSideSlideSettled(page, 3)
   await expectNoHeightMotion(page)
