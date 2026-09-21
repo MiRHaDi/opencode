@@ -263,7 +263,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         )
       })
       // Solid components own scoped renderer subscriptions, so normal app composition exceeds EventEmitter's default.
-      renderer.setMaxListeners(50)
+      renderer.setMaxListeners(15)
       const clipboard = yield* Effect.acquireRelease(
         Effect.sync(() => createTuiClipboard(renderer)),
         (clipboard) =>
